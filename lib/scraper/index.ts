@@ -1,7 +1,7 @@
 // lib/scraper/index.ts
 // The one function the API routes call: scrapeProduct(url).
 
-import { fetchHtml, errorStatus } from './fetcher'
+import { getCandidates, blockError, errorStatus } from './fetcher'
 import { extractProduct, storeLabel } from './parsers'
 import { formatPrice } from './price'
 
@@ -39,23 +39,41 @@ export async function scrapeProduct(rawUrl: string): Promise<ScrapedProduct> {
     throw error
   }
 
-  const html = await fetchHtml(parsed.href)
-  const { title, priceValue, image } = extractProduct(parsed.href, html)
+  // Try every route in order: download AND parse must both succeed.
+  // Failures are collected so the function logs show exactly what happened.
+  const failures: string[] = []
 
-  // Default alert price: ~10% under the current price (round to tens).
-  const targetValue = Math.round((priceValue * 0.9) / 10) * 10
+  for (const candidate of getCandidates(parsed.href)) {
+    try {
+      const html = await candidate.run()
+      const { title, priceValue, image } = extractProduct(parsed.href, html)
 
-  return {
-    url: parsed.href,
-    title,
-    store: storeLabel(parsed.href),
-    image,
-    price: formatPrice(priceValue),
-    target: formatPrice(targetValue),
-    priceValue,
-    targetValue,
-    scannedAt: new Date().toISOString(),
+      // Default alert price: ~10% under the current price (round to tens).
+      const targetValue = Math.round((priceValue * 0.9) / 10) * 10
+
+      console.log(`[scraper] OK via ${candidate.label}: "${title}" ${formatPrice(priceValue)}`)
+
+      return {
+        url: parsed.href,
+        title,
+        store: storeLabel(parsed.href),
+        image,
+        price: formatPrice(priceValue),
+        target: formatPrice(targetValue),
+        priceValue,
+        targetValue,
+        scannedAt: new Date().toISOString(),
+      }
+    } catch (error) {
+      const err = error as Error & { fatal?: boolean }
+      if (err.fatal) throw err // dead link: stop the whole chain
+      failures.push(`${candidate.label}=${err.message}`)
+      console.warn(`[scraper] ${candidate.label} failed: ${err.message}`)
+    }
   }
+
+  console.error(`[scraper] all routes failed for ${parsed.href} -> ${failures.join(' | ')}`)
+  throw blockError()
 }
 
 export { errorStatus }
