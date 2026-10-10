@@ -16,8 +16,8 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
-// Where the Express backend lives (server/index.js).
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api'
+// The API now lives inside this same Next.js app (Vercel serverless functions).
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || '/api'
 
 type Product = {
   id?: number
@@ -138,7 +138,7 @@ export default function Page() {
           return [...fromServer.filter((product) => product.url && !knownUrls.has(product.url)), ...current]
         })
       })
-      .catch(() => setNotice('Tip: run `pnpm server` in a second terminal so your links get saved.'))
+      .catch(() => setNotice('Tip: add DATABASE_URL in Vercel → Settings so your links get saved.'))
   }, [])
 
   async function startTracking(event: FormEvent<HTMLFormElement>) {
@@ -170,7 +170,7 @@ export default function Page() {
       setUrl('')
       setNotice(`Tracking started · checking ${frequency.toLowerCase()}`)
     } catch {
-      setNotice('Could not reach the backend. Start it with `pnpm server`.')
+      setNotice('Could not reach the API. Check the Vercel function logs.')
     } finally {
       setBusy(false)
     }

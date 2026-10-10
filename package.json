@@ -6,22 +6,17 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "server": "node server/index.js",
-    "server:demo": "RESCAN_ON_BOOT=true node server/index.js"
+    "start": "next start"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
     "@vercel/analytics": "1.6.1",
-    "better-sqlite3": "^11.10.0",
     "cheerio": "^1.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "cors": "^2.8.6",
-    "express": "^5.2.1",
     "lucide-react": "^1.16.0",
     "next": "16.4.0",
-    "node-cron": "^4.6.0",
+    "postgres": "^3.4.9",
     "react": "^19",
     "react-dom": "^19",
     "shadcn": "^4.11.0",

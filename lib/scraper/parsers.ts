@@ -1,27 +1,20 @@
-// server/parsers.js
-// Universal product parser.
-//
-// Almost every shop publishes the same standard metadata, so one generic
-// pass works almost everywhere:
-//   - JSON-LD   <script type="application/ld+json">  (Schema.org Product)
-//   - OpenGraph <meta property="og:title">, "product:price:amount", ...
-//   - Microdata <span itemprop="price">1,499</span>
-//
-// Known marketplaces (Amazon, Flipkart, Myntra, Ajio, Nykaa) get a precise
-// selector shortcut first, then fall back to the generic pass. New shops
-// need no configuration at all.
+// lib/scraper/parsers.ts
+// Universal product parser — works on any shop that publishes standard
+// metadata (JSON-LD, OpenGraph, microdata). Known marketplaces get a
+// precise selector shortcut first, then fall back to the generic pass.
 
-const cheerio = require('cheerio')
-const { parsePrice } = require('./price')
-const { blockError } = require('./errors')
+import * as cheerio from 'cheerio'
+import type { CheerioAPI } from 'cheerio'
+import { parsePrice } from './price'
+import { blockError } from './fetcher'
 
 // "amazon.in" -> "amazon", "www.croma.com" -> "croma"
-function storeLabel(url) {
+export function storeLabel(url: string): string {
   const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '')
   return host.split('.')[0]
 }
 
-const SITE_SELECTORS = {
+const SITE_SELECTORS: Record<string, { title: string[]; price: string[] }> = {
   amazon: {
     title: ['#productTitle', '#title span', '#title'],
     price: [
@@ -53,7 +46,7 @@ const SITE_SELECTORS = {
 }
 
 // The generic metadata that works on Myntra, Ajio, Nykaa, Croma, Meesho,
-// Shopify stores (D2C brands), and basically anything Schema.org-compatible.
+// Shopify stores (D2C brands), and anything Schema.org-compatible.
 const GENERIC_TITLE_META = ['meta[property="og:title"]', 'meta[name="twitter:title"]', 'meta[itemprop="name"]', 'title']
 const GENERIC_PRICE_META = [
   'meta[property="product:price:amount"]',
@@ -64,8 +57,7 @@ const GENERIC_PRICE_META = [
 ]
 const GENERIC_IMAGE_META = ['meta[property="og:image"]', 'meta[name="twitter:image"]']
 
-// Returns the first selector that has text, e.g. firstText($, ['#productTitle', '#title'])
-function firstText($, selectors) {
+function firstText($: CheerioAPI, selectors: string[]): string {
   for (const selector of selectors) {
     const text = $(selector).first().text().replace(/\s+/g, ' ').trim()
     if (text) return text
@@ -74,7 +66,7 @@ function firstText($, selectors) {
 }
 
 // Meta tags store text in `content`; regular elements store it as text.
-function firstContent($, selectors) {
+function firstContent($: CheerioAPI, selectors: string[]): string {
   for (const selector of selectors) {
     const element = $(selector).first()
     if (!element.length) continue
@@ -84,10 +76,9 @@ function firstContent($, selectors) {
   return ''
 }
 
-// og:title often looks like "Buy Nike Shoes -  - Footwear for Men" or
-// "AirPods Pro : Flipkart". Keep the longest piece, then strip the
-// marketing words shops like to glue onto their titles.
-function cleanTitle(raw) {
+// Titles often arrive as "Buy Nike Shoes -  - Footwear for Men" or
+// "AirPods Pro : Flipkart". Keep the longest piece, strip marketing words.
+function cleanTitle(raw: string): string {
   const pieces = raw
     .split(/\s*(?:\s[|:]\s|\s[–—]\s|\s-\s)\s*/)
     .map((piece) => piece.trim())
@@ -99,53 +90,65 @@ function cleanTitle(raw) {
     .trim()
 }
 
-function pickImage(image) {
+function pickImage(image: unknown): string | null {
   if (!image) return null
   if (typeof image === 'string') return image
-  if (Array.isArray(image)) return typeof image[0] === 'string' ? image[0] : image[0]?.url ?? null
-  if (typeof image === 'object') return image.url ?? null
+  if (Array.isArray(image)) {
+    const first: unknown = image[0]
+    return typeof first === 'string' ? first : (first as { url?: string } | null)?.url ?? null
+  }
+  if (typeof image === 'object') return (image as { url?: string }).url ?? null
   return null
+}
+
+interface LdResult {
+  title: string
+  price: number | null
+  image: string | null
 }
 
 // Schema.org structured data — survives class-name redesigns, so it is the
 // most reliable generic source.
-function fromJsonLd($) {
+function fromJsonLd($: CheerioAPI): LdResult {
   let title = ''
-  let price = null
-  let image = null
+  let price: number | null = null
+  let image: string | null = null
 
   $('script[type="application/ld+json"]').each((_, element) => {
-    let data
+    let data: unknown
     try {
       // Some shops (Myntra, for one) put raw line breaks inside JSON
       // strings, which is invalid. Control characters are legal JSON
-      // whitespace outside strings and harmless spaces inside them,
-      // so replacing them repairs the block.
+      // whitespace outside strings and harmless spaces inside them.
       data = JSON.parse($(element).text().replace(/[\u0000-\u001F]/g, ' '))
     } catch {
-      return true // this block is not valid JSON even after repair, skip it
+      return true // not valid JSON even after repair, skip it
     }
 
-    const nodes = Array.isArray(data)
+    const record = data as Record<string, unknown>
+    const nodes: unknown[] = Array.isArray(data)
       ? data
-      : data && Array.isArray(data['@graph'])
-        ? data['@graph']
+      : record && Array.isArray(record['@graph'])
+        ? (record['@graph'] as unknown[])
         : [data]
 
-    for (const node of nodes) {
-      if (!node || typeof node !== 'object') continue
+    for (const raw of nodes) {
+      if (!raw || typeof raw !== 'object') continue
+      const node = raw as Record<string, unknown>
 
       // Only trust Product nodes — pages often include Organization or
       // WebSite blocks whose "name" is just the shop's brand.
-      const types = Array.isArray(node['@type']) ? node['@type'] : [node['@type']]
+      const type = node['@type']
+      const types = Array.isArray(type) ? type.map(String) : [String(type)]
       if (!types.includes('Product')) continue
 
       if (!title && typeof node.name === 'string') title = node.name.trim()
       if (!image) image = pickImage(node.image)
 
-      const offer = Array.isArray(node.offers) ? node.offers[0] : node.offers
-      if (price === null && offer && offer.price !== undefined) price = parsePrice(offer.price)
-      if (price === null && node.lowPrice !== undefined) price = parsePrice(node.lowPrice)
+      const offers = node.offers
+      const offer = Array.isArray(offers) ? (offers[0] as Record<string, unknown>) : (offers as Record<string, unknown> | undefined)
+      if (price === null && offer && offer.price !== undefined) price = parsePrice(String(offer.price))
+      if (price === null && node.lowPrice !== undefined) price = parsePrice(String(node.lowPrice))
     }
     return true
   })
@@ -153,7 +156,14 @@ function fromJsonLd($) {
   return { title, price, image }
 }
 
-function extractProduct(url, html) {
+export interface ExtractedProduct {
+  title: string
+  priceValue: number
+  image: string | null
+  label: string
+}
+
+export function extractProduct(url: string, html: string): ExtractedProduct {
   const $ = cheerio.load(html)
   const label = storeLabel(url)
   const site = SITE_SELECTORS[label]
@@ -175,5 +185,3 @@ function extractProduct(url, html) {
 
   return { title: cleanTitle(title), priceValue, image, label }
 }
-
-module.exports = { extractProduct, storeLabel }

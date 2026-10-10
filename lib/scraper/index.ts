@@ -1,29 +1,41 @@
-// server/scraper.js
-// The one function the rest of the app calls: scrapeProduct(url).
-// It only orchestrates: validate -> download (fetcher) -> parse (parsers).
-const { fetchHtml } = require('./fetcher')
-const { extractProduct, storeLabel } = require('./parsers')
-const { formatPrice } = require('./price')
+// lib/scraper/index.ts
+// The one function the API routes call: scrapeProduct(url).
 
-function normalizeUrl(raw) {
+import { fetchHtml, errorStatus } from './fetcher'
+import { extractProduct, storeLabel } from './parsers'
+import { formatPrice } from './price'
+
+export interface ScrapedProduct {
+  url: string
+  title: string
+  store: string
+  image: string | null
+  price: string
+  target: string
+  priceValue: number
+  targetValue: number
+  scannedAt: string
+}
+
+function normalizeUrl(raw: string): string {
   const trimmed = String(raw).trim()
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
 }
 
-async function scrapeProduct(rawUrl) {
+export async function scrapeProduct(rawUrl: string): Promise<ScrapedProduct> {
   const url = normalizeUrl(rawUrl)
 
-  let parsed
+  let parsed: URL
   try {
     parsed = new URL(url)
   } catch {
     const error = new Error('That does not look like a valid URL.')
-    error.status = 400
+    ;(error as Error & { status: number }).status = 400
     throw error
   }
   if (!/^https?:$/.test(parsed.protocol)) {
     const error = new Error('Only http(s) links are supported.')
-    error.status = 400
+    ;(error as Error & { status: number }).status = 400
     throw error
   }
 
@@ -46,4 +58,4 @@ async function scrapeProduct(rawUrl) {
   }
 }
 
-module.exports = { scrapeProduct, normalizeUrl }
+export { errorStatus }

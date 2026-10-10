@@ -1,17 +1,37 @@
-// server/fetcher.js
-// Downloads a product page, with an anti-bot failover chain:
+// lib/scraper/fetcher.ts
+// Downloads a product page, with an anti-bot failover chain (same as before,
+// now running inside a Vercel serverless function):
 //
-//   1. DIRECT      plain fetch with browser headers (free, instant)
-//   2. PAID APIs   ScraperAPI / ScrapingBee — only if you add a free API key
-//                  in config.js. These route the request through their own
-//                  residential IPs, which is what beats most bot walls.
+//   1. DIRECT       plain fetch with browser headers (free, instant)
+//   2. PAID APIs    ScraperAPI / ScrapingBee — only if a free API key is set
 //   3. FREE PROXIES allorigins / codetabs (no key, slower, best-effort)
 //
-// We move down the chain automatically whenever a response looks like a block:
+// We drop down the chain whenever a response looks like a bot block:
 // HTTP 403 / 429 / 503, a captcha page, or an "access denied" page.
 
-const config = require('./config')
-const { blockError, notFoundError } = require('./errors')
+const SCRAPERAPI_API_KEY = process.env.SCRAPERAPI_API_KEY || ''
+const SCRAPINGBEE_API_KEY = process.env.SCRAPINGBEE_API_KEY || ''
+
+// Shown when a site blocks us or we cannot find a price.
+export const BLOCK_MESSAGE = 'Unable to scan product. Please check the URL or try again.'
+
+export function blockError(): Error {
+  const error = new Error(BLOCK_MESSAGE)
+  ;(error as Error & { status: number }).status = 502
+  return error
+}
+
+// Shown when the link itself is dead. `fatal` stops the failover chain early.
+export function notFoundError(): Error {
+  const error = new Error('We could not find a product on that link. Please check the URL.')
+  ;(error as Error & { status: number; fatal: boolean }).status = 404
+  ;(error as Error & { status: number; fatal: boolean }).fatal = true
+  return error
+}
+
+export function errorStatus(error: Error): number {
+  return (error as Error & { status?: number }).status || 500
+}
 
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -19,8 +39,7 @@ const USER_AGENTS = [
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
 ]
 
-// Browser-like headers. Without these, most shops say no.
-function browserHeaders() {
+function browserHeaders(): Record<string, string> {
   return {
     'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -35,7 +54,7 @@ function browserHeaders() {
   }
 }
 
-async function fetchWithTimeout(url, timeoutMs) {
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<{ status: number; body: string }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -51,8 +70,7 @@ async function fetchWithTimeout(url, timeoutMs) {
   }
 }
 
-// Spots bot walls: bad status codes, captcha pages, "access denied" pages.
-function looksBlocked(status, body) {
+function looksBlocked(status: number, body: string): boolean {
   if (status === 403 || status === 429 || status === 503 || status >= 500) return true
   const start = body.slice(0, 8000).toLowerCase()
   const markers = [
@@ -68,10 +86,9 @@ function looksBlocked(status, body) {
   return markers.some((marker) => start.includes(marker))
 }
 
-// Step 2 targets — only used when an API key exists in config.js.
-function scraperApiTarget(url) {
+function scraperApiTarget(url: string): string {
   const query = new URLSearchParams({
-    api_key: config.SCRAPERAPI_API_KEY,
+    api_key: SCRAPERAPI_API_KEY,
     url,
     country_code: 'in',
     premium: 'true',
@@ -79,9 +96,9 @@ function scraperApiTarget(url) {
   return `https://api.scraperapi.com/?${query}`
 }
 
-function scrapingBeeTarget(url) {
+function scrapingBeeTarget(url: string): string {
   const query = new URLSearchParams({
-    api_key: config.SCRAPINGBEE_API_KEY,
+    api_key: SCRAPINGBEE_API_KEY,
     url,
     country_code: 'in',
     render_js: 'false',
@@ -89,13 +106,15 @@ function scrapingBeeTarget(url) {
   return `https://app.scrapingbee.com/api/v1/?${query}`
 }
 
-async function fetchHtml(url) {
-  const attempts = [{ label: 'direct', target: url, timeout: 10000 }]
+export async function fetchHtml(url: string): Promise<string> {
+  const attempts: { label: string; target: string; timeout: number }[] = [
+    { label: 'direct', target: url, timeout: 10000 },
+  ]
 
-  if (config.SCRAPERAPI_API_KEY) {
+  if (SCRAPERAPI_API_KEY) {
     attempts.push({ label: 'ScraperAPI', target: scraperApiTarget(url), timeout: 30000 })
   }
-  if (config.SCRAPINGBEE_API_KEY) {
+  if (SCRAPINGBEE_API_KEY) {
     attempts.push({ label: 'ScrapingBee', target: scrapingBeeTarget(url), timeout: 30000 })
   }
 
@@ -120,12 +139,11 @@ async function fetchHtml(url) {
 
       console.warn(`[fetcher] ${attempt.label} looks blocked (HTTP ${status})`)
     } catch (error) {
-      if (error.fatal) throw error
-      console.warn(`[fetcher] ${attempt.label} failed: ${error.message}`)
+      const err = error as Error & { fatal?: boolean }
+      if (err.fatal) throw err
+      console.warn(`[fetcher] ${attempt.label} failed: ${err.message}`)
     }
   }
 
   throw blockError()
 }
-
-module.exports = { fetchHtml }

@@ -1,8 +1,7 @@
-// server/price.js
+// lib/scraper/price.ts
 // Shared price helpers: "₹1,49,999.00" <-> 149999
 
-// Handles: "₹1,499"  "Rs. 499"  "Rs 1,49,999.00"  "INR 24990"  "MRP: ₹1,499.50"
-function parsePrice(text) {
+export function parsePrice(text: string | null | undefined): number | null {
   if (text === null || text === undefined) return null
   const cleaned = String(text).replace(/[\s,]/g, '')
   const match = cleaned.match(/(\d+(?:\.\d+)?)/)
@@ -11,15 +10,13 @@ function parsePrice(text) {
   return Number.isFinite(value) ? Math.round(value) : null
 }
 
-function formatPrice(amount) {
+export function formatPrice(amount: number): string {
   return `₹${Math.round(amount).toLocaleString('en-IN')}`
 }
 
 // "−8.4%" label for a drop from `previous` to `next`, else null.
-function priceChangeLabel(previous, next) {
+export function priceChangeLabel(previous: number, next: number): string | null {
   if (!previous || next >= previous) return null
   const percent = ((previous - next) / previous) * 100
   return `−${percent.toFixed(1)}%`
 }
-
-module.exports = { parsePrice, formatPrice, priceChangeLabel }
