@@ -5,7 +5,7 @@
 
 import * as cheerio from 'cheerio'
 import type { CheerioAPI } from 'cheerio'
-import { parsePrice } from './price'
+import { detectCurrency, parsePrice, type Currency } from './price'
 import { blockError } from './fetcher'
 
 // "amazon.in" -> "amazon", "www.croma.com" -> "croma"
@@ -47,7 +47,12 @@ const SITE_SELECTORS: Record<string, { title: string[]; price: string[] }> = {
 
 // The generic metadata that works on Myntra, Ajio, Nykaa, Croma, Meesho,
 // Shopify stores (D2C brands), and anything Schema.org-compatible.
-const GENERIC_TITLE_META = ['meta[property="og:title"]', 'meta[name="twitter:title"]', 'meta[itemprop="name"]', 'title']
+const GENERIC_TITLE_META = [
+  'meta[property="og:title"]',
+  'meta[name="twitter:title"]',
+  'meta[itemprop="name"]',
+  'title',
+]
 const GENERIC_PRICE_META = [
   'meta[property="product:price:amount"]',
   'meta[property="og:price:amount"]',
@@ -83,7 +88,10 @@ function cleanTitle(raw: string): string {
     .split(/\s*(?:\s[|:]\s|\s[–—]\s|\s-\s)\s*/)
     .map((piece) => piece.trim())
     .filter(Boolean)
-  const best = pieces.length === 1 ? pieces[0] : pieces.reduce((longest, piece) => (piece.length > longest.length ? piece : longest), '')
+  const best =
+    pieces.length === 1
+      ? pieces[0]
+      : pieces.reduce((longest, piece) => (piece.length > longest.length ? piece : longest), '')
   return best
     .replace(/^buy\s+/i, '')
     .replace(/\s+(price in india|buy online|online at best price|best price( in india)?|buy now)$/i, '')
@@ -95,7 +103,7 @@ function pickImage(image: unknown): string | null {
   if (typeof image === 'string') return image
   if (Array.isArray(image)) {
     const first: unknown = image[0]
-    return typeof first === 'string' ? first : (first as { url?: string } | null)?.url ?? null
+    return typeof first === 'string' ? first : ((first as { url?: string } | null)?.url ?? null)
   }
   if (typeof image === 'object') return (image as { url?: string }).url ?? null
   return null
@@ -120,7 +128,11 @@ function fromJsonLd($: CheerioAPI): LdResult {
       // Some shops (Myntra, for one) put raw line breaks inside JSON
       // strings, which is invalid. Control characters are legal JSON
       // whitespace outside strings and harmless spaces inside them.
-      data = JSON.parse($(element).text().replace(/[\u0000-\u001F]/g, ' '))
+      data = JSON.parse(
+        $(element)
+          .text()
+          .replace(/[\u0000-\u001F]/g, ' '),
+      )
     } catch {
       return true // not valid JSON even after repair, skip it
     }
@@ -146,7 +158,9 @@ function fromJsonLd($: CheerioAPI): LdResult {
       if (!image) image = pickImage(node.image)
 
       const offers = node.offers
-      const offer = Array.isArray(offers) ? (offers[0] as Record<string, unknown>) : (offers as Record<string, unknown> | undefined)
+      const offer = Array.isArray(offers)
+        ? (offers[0] as Record<string, unknown>)
+        : (offers as Record<string, unknown> | undefined)
       if (price === null && offer && offer.price !== undefined) price = parsePrice(String(offer.price))
       if (price === null && node.lowPrice !== undefined) price = parsePrice(String(node.lowPrice))
     }
@@ -159,6 +173,7 @@ function fromJsonLd($: CheerioAPI): LdResult {
 export interface ExtractedProduct {
   title: string
   priceValue: number
+  currency: Currency
   image: string | null
   label: string
 }
@@ -183,5 +198,5 @@ export function extractProduct(url: string, html: string): ExtractedProduct {
 
   if (!title || !priceValue) throw blockError()
 
-  return { title: cleanTitle(title), priceValue, image, label }
+  return { title: cleanTitle(title), priceValue, currency: detectCurrency(priceText), image, label }
 }

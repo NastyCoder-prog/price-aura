@@ -11,20 +11,25 @@
 // Every failure is logged with its reason, so Vercel's function logs show
 // exactly what each attempt returned.
 
-// Shown when a site blocks us or we cannot find a price.
-export const BLOCK_MESSAGE = 'Unable to scan product. Please check the URL or try again.'
+import { ApiError } from '../api-error'
 
-export function blockError(): Error {
-  const error = new Error(BLOCK_MESSAGE)
-  ;(error as Error & { status: number }).status = 502
-  return error
+// Shown when a site blocks us or we cannot find a price.
+export const BLOCK_MESSAGE = 'Unable to scan that page right now. Please try again in a few minutes.'
+
+export function blockError(): ApiError {
+  return new ApiError(BLOCK_MESSAGE, 502, 'scrape_blocked')
 }
 
 // Shown when the link itself is dead. `fatal` stops the whole chain early.
-export function notFoundError(): Error {
-  const error = new Error('We could not find a product on that link. Please check the URL.')
-  ;(error as Error & { status?: number; fatal?: boolean }).status = 404
-  ;(error as Error & { status?: number; fatal?: boolean }).fatal = true
+export function notFoundError(): ApiError & { fatal: boolean } {
+  const error = new ApiError(
+    'We could not find a product on that link. Please check the URL.',
+    404,
+    'not_found',
+  ) as ApiError & {
+    fatal: boolean
+  }
+  error.fatal = true
   return error
 }
 
@@ -84,7 +89,12 @@ export interface Candidate {
 
 // One download attempt with its own timeout. Returns HTML or throws with a
 // human-readable reason (except a dead link, which throws a fatal error).
-function attempt(label: string, target: string, timeoutMs: number, extraHeaders: Record<string, string> = {}): Candidate {
+export function attempt(
+  label: string,
+  target: string,
+  timeoutMs: number,
+  extraHeaders: Record<string, string> = {},
+): Candidate {
   return {
     label,
     run: async () => {
@@ -99,7 +109,11 @@ function attempt(label: string, target: string, timeoutMs: number, extraHeaders:
         const body = await response.text()
 
         // A dead product link fails instantly — no point trying other routes.
-        if (response.status === 404 || response.status === 410 || /<title>[^<]*page not found/i.test(body.slice(0, 3000))) {
+        if (
+          response.status === 404 ||
+          response.status === 410 ||
+          /<title>[^<]*page not found/i.test(body.slice(0, 3000))
+        ) {
           throw notFoundError()
         }
 
@@ -116,7 +130,12 @@ function attempt(label: string, target: string, timeoutMs: number, extraHeaders:
         const err = error as Error & { fatal?: boolean }
         if (err.fatal) throw err
         if (err.name === 'AbortError') throw new Error(`timed out after ${timeoutMs}ms`)
-        if (err.message.startsWith('page is') || err.message.startsWith('empty') || err.message.startsWith('timed') || err.message.startsWith('HTTP')) {
+        if (
+          err.message.startsWith('page is') ||
+          err.message.startsWith('empty') ||
+          err.message.startsWith('timed') ||
+          err.message.startsWith('HTTP')
+        ) {
           throw err
         }
         throw new Error(err.message || 'network error')
@@ -139,11 +158,21 @@ export function getCandidates(url: string): Candidate[] {
 
   // Optional paid anti-bot APIs — tried before the free proxies if configured.
   if (SCRAPERAPI_API_KEY) {
-    const query = new URLSearchParams({ api_key: SCRAPERAPI_API_KEY, url, country_code: 'in', premium: 'true' })
+    const query = new URLSearchParams({
+      api_key: SCRAPERAPI_API_KEY,
+      url,
+      country_code: 'in',
+      premium: 'true',
+    })
     list.push(attempt('ScraperAPI', `https://api.scraperapi.com/?${query}`, 15000))
   }
   if (SCRAPINGBEE_API_KEY) {
-    const query = new URLSearchParams({ api_key: SCRAPINGBEE_API_KEY, url, country_code: 'in', render_js: 'false' })
+    const query = new URLSearchParams({
+      api_key: SCRAPINGBEE_API_KEY,
+      url,
+      country_code: 'in',
+      render_js: 'false',
+    })
     list.push(attempt('ScrapingBee', `https://app.scrapingbee.com/api/v1/?${query}`, 15000))
   }
 
@@ -153,7 +182,10 @@ export function getCandidates(url: string): Candidate[] {
     attempt('codetabs proxy', `https://api.codetabs.com/v1/proxy?quest=${encoded}`, 8000),
     // Last resort: Jina Reader renders the page on their servers and hands
     // us back clean HTML. Free, no API key.
-    attempt('jina reader', `https://r.jina.ai/${url}`, 12000, { 'X-Respond-With': 'html', Accept: 'text/html' })
+    attempt('jina reader', `https://r.jina.ai/${url}`, 12000, {
+      'X-Respond-With': 'html',
+      Accept: 'text/html',
+    }),
   )
 
   return list

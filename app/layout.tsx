@@ -2,10 +2,26 @@ import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
+const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000').replace(/\/$/, '')
+
 export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
   title: 'PriceAura — Never overpay again',
-  description: 'AI-powered price tracking for smarter shopping across Amazon and Flipkart.',
-  generator: 'v0.app',
+  description:
+    'Search any product and compare live offers across Amazon, Flipkart, Walmart, eBay and more. Get email alerts when the price drops.',
+  openGraph: {
+    title: 'PriceAura — Never overpay again',
+    description:
+      'Live price tracking across major stores. Search by name, watch the price, buy at the right moment.',
+    url: siteUrl,
+    siteName: 'PriceAura',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary',
+    title: 'PriceAura — Never overpay again',
+    description: 'Live price tracking across major stores with email alerts on drops.',
+  },
   icons: {
     icon: [
       {
@@ -26,11 +42,8 @@ export const metadata: Metadata = {
 }
 
 export const viewport: Viewport = {
-  colorScheme: 'light dark',
-  themeColor: [
-    { media: '(prefers-color-scheme: light)', color: 'white' },
-    { media: '(prefers-color-scheme: dark)', color: 'black' },
-  ],
+  colorScheme: 'dark',
+  themeColor: '#080b0d',
 }
 
 export default function RootLayout({
