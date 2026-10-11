@@ -105,15 +105,15 @@ must be correct in production.
 
 ## 6. The cron (backend price checks)
 
-`vercel.json` schedules **twice-daily** checks:
+`vercel.json` schedules **daily** checks:
 
 ```json
-{ "path": "/api/cron/check-prices", "schedule": "0 4,16 * * *" } // 04:00 & 16:00 UTC
+{ "path": "/api/cron/check-prices", "schedule": "0 4 * * *" } // daily 04:00 UTC
 ```
 
-- Multiple runs per day require **Vercel Pro**. On Hobby, reduce to a single
-  daily entry: `"0 4 * * *"` — per-product intervals are still honoured, just
-  less often.
+- Vercel **Hobby allows daily crons only**. On Pro, you can raise this to
+  twice-daily (`"0 4,16 * * *"`) or hourly (`"0 * * * *"`) — per-product
+  intervals are honoured either way, just less often on Hobby.
 - The endpoint **fails closed** in production if `CRON_SECRET` is missing, and
   rejects any request without `Authorization: Bearer $CRON_SECRET`.
 - It only scans **due** products (older than their per-product check interval),
