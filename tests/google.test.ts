@@ -165,3 +165,39 @@ describe('selectOffer', () => {
     expect(selectOffer([offer({ link: '' })])).toBeNull()
   })
 })
+
+describe('relevance filtering (query-aware selectOffer)', () => {
+  const query = 'Sony WH-1000XM5 headphones'
+
+  it('prefers the real product over a cheaper accessory', () => {
+    const offers = [
+      offer({ title: 'JBL T205BT Wireless Bluetooth In Ear Neckband', price: 990, merchant: 'flipkart', link: 'https://www.flipkart.com/jbl' }),
+      offer({ title: 'Sony WH-1000XM5 Noise Cancelling Headphones', price: 24990, merchant: 'amazon', link: 'https://www.amazon.in/sony' }),
+      offer({ title: '1Pair Headphone Covers for Sony WH-XB910N', price: 300, merchant: 'fruugo', link: 'https://www.fruugo.sg/covers' }),
+    ]
+    // Without relevance, the ₹300 cover would win on price alone.
+    expect(selectOffer(offers, null, query)?.title).toContain('WH-1000XM5')
+  })
+
+  it('keeps the most-relevant cluster and drops near-duplicates noise', () => {
+    const offers = [
+      offer({ title: 'Sony WH-1000XM5 Silver', price: 25990, link: 'https://a.example/1' }),
+      offer({ title: 'Sony WH1000XM5B Black', price: 24490, link: 'https://a.example/2' }),
+      offer({ title: 'Random USB-C Cable', price: 199, link: 'https://a.example/3' }),
+    ]
+    expect(selectOffer(offers, null, query)?.price).toBe(24490)
+  })
+
+  it('falls back to all offers when nothing matches the query well', () => {
+    const offers = [offer({ title: 'Mystery Gadget', price: 500 }), offer({ title: 'Another Thing', price: 400 })]
+    expect(selectOffer(offers, null, query)?.price).toBe(400)
+  })
+
+  it('uses the model number to tell iPhone 15 apart from a cheaper iPhone 12', () => {
+    const offers = [
+      offer({ title: 'Apple iPhone 12 - 128GB - White', price: 34101, merchant: 'ubuy', link: 'https://u.example/12' }),
+      offer({ title: 'Apple iPhone 15 (128 GB) - Green', price: 59900, merchant: 'reliancedigital', link: 'https://r.example/15' }),
+    ]
+    expect(selectOffer(offers, null, 'iPhone 15 128GB')?.title).toContain('iPhone 15')
+  })
+})

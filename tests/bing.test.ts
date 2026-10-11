@@ -24,8 +24,8 @@ function card({
 }
 
 describe('buildBingShopUrl', () => {
-  it('encodes the query', () => {
-    expect(buildBingShopUrl('Sony WH-1000XM5')).toBe('https://www.bing.com/shop?q=Sony%20WH-1000XM5')
+  it('encodes the query and pins the India market', () => {
+    expect(buildBingShopUrl('Sony WH-1000XM5')).toBe('https://www.bing.com/shop?q=Sony%20WH-1000XM5&mkt=en-IN')
   })
 })
 
@@ -92,5 +92,34 @@ describe('parseBingResults', () => {
 
   it('returns an empty list when the page is not a results page', () => {
     expect(parseBingResults('<html><body>blocked</body></html>', 'https://www.bing.com/shop?q=x')).toEqual([])
+  })
+
+  it('parses the Singapore (Vercel sin1) variant and decodes /ck/a links', () => {
+    // Builds a Bing /ck/a click-tracking redirect whose u=a1<base64url> holds
+    // the real merchant URL — exactly how the sin1 layout ships its links.
+    const merchantUrl = 'https://www.fruugo.sg/sony-wh-1000xm5/p/12345'
+    const ckHref = `https://www.bing.com/ck/a?!&&p=abc123&u=a1${Buffer.from(merchantUrl, 'utf-8').toString('base64url')}`
+    const fullTitle = 'Sony WH-1000XM5 Wireless Noise Cancelling Headphones Black'
+    const html = `
+      <div class="br-item br-card">
+        <a class="br-voidlink br-titleClickWrap linkBtn" href="javascript:void(0)">
+          <div class="br-pdItemName"><span title="${fullTitle}">${fullTitle.slice(0, 28)}…</span></div>
+        </a>
+        <div class="pd-price">$298.00</div>
+        <div class="br-sellersCite">www.fruugo.sg</div>
+        <a class="br-compareSellers" href="${ckHref}">Compare sellers</a>
+        <img src="https://th.bing.com/th/id/OPAC.x?w=248" alt="${fullTitle}" />
+      </div>`
+
+    const offers = parseBingResults(html, 'https://www.bing.com/shop?q=x&cc=in')
+    expect(offers).toHaveLength(1)
+    expect(offers[0]).toMatchObject({
+      title: fullTitle,
+      price: 298,
+      currency: 'USD',
+      merchant: 'fruugo',
+      merchantLabel: 'www.fruugo.sg',
+      link: merchantUrl,
+    })
   })
 })

@@ -51,7 +51,9 @@ function browserHeaders(userAgent?: string): Record<string, string> {
     'User-Agent': userAgent || DESKTOP_USER_AGENTS[Math.floor(Math.random() * DESKTOP_USER_AGENTS.length)],
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate',
+    // NOTE: never set Accept-Encoding manually — Node's fetch (undici)
+    // decompresses gzip/br automatically, and overriding the header makes it
+    // hand back raw compressed bytes that .text() turns into unreadable noise.
     'Cache-Control': 'no-cache',
     'Upgrade-Insecure-Requests': '1',
     'Sec-Fetch-Dest': 'document',
@@ -89,11 +91,15 @@ export interface Candidate {
 
 // One download attempt with its own timeout. Returns HTML or throws with a
 // human-readable reason (except a dead link, which throws a fatal error).
+// `minimal` drops the browser-boilerplate headers (Sec-Fetch, etc.) — some
+// sites (Bing) serve a consent/interstitial page when they see navigation
+// headers from a datacenter IP, so aggregators fetch with a lean header set.
 export function attempt(
   label: string,
   target: string,
   timeoutMs: number,
   extraHeaders: Record<string, string> = {},
+  minimal = false,
 ): Candidate {
   return {
     label,
@@ -101,8 +107,15 @@ export function attempt(
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), timeoutMs)
       try {
+        const baseHeaders = minimal
+          ? {
+              'User-Agent': extraHeaders['User-Agent'] || DESKTOP_USER_AGENTS[0],
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9',
+            }
+          : browserHeaders(extraHeaders['User-Agent'])
         const response = await fetch(target, {
-          headers: { ...browserHeaders(extraHeaders['User-Agent']), ...extraHeaders },
+          headers: { ...baseHeaders, ...extraHeaders },
           redirect: 'follow',
           signal: controller.signal,
         })

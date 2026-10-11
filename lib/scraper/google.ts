@@ -375,7 +375,7 @@ export async function searchShopping(
   // ---- Source 1: Bing Shopping --------------------------------------------
   try {
     const { searchUrl, offers } = await searchBing(query, { ...options, deadline })
-    const best = selectOffer(offers, options.preferredCurrency)
+    const best = selectOffer(offers, options.preferredCurrency, query)
     if (best) return { searchUrl, offers, best, source: 'bing' }
     // Offers exist but none match the tracked currency — try the other
     // sources too before giving up.
@@ -388,7 +388,7 @@ export async function searchShopping(
   if (serpApiAvailable() && !deadline()) {
     try {
       const { searchUrl, offers } = await searchSerpApi(query, { batch: options.batch })
-      const best = selectOffer(offers, options.preferredCurrency)
+      const best = selectOffer(offers, options.preferredCurrency, query)
       if (best) return { searchUrl, offers, best, source: 'serpapi' }
       currencyError ??= noOffersError()
     } catch (error) {
@@ -400,7 +400,7 @@ export async function searchShopping(
   if (!deadline()) {
     try {
       const { searchUrl, offers } = await searchGoogle(query, { ...options, deadline })
-      const best = selectOffer(offers, options.preferredCurrency)
+      const best = selectOffer(offers, options.preferredCurrency, query)
       if (best) return { searchUrl, offers, best, source: 'google' }
       currencyError ??= noOffersError()
     } catch (error) {
@@ -419,14 +419,63 @@ function noOffersError(): ApiError {
   )
 }
 
+// Aggregators return loosely-related accessories alongside the real product
+// (a ₹990 case next to a ₹25k phone). To avoid tracking the wrong item we
+// score each offer by how many of the query's *significant* tokens its title
+// contains, then keep only the most-relevant cluster before ranking.
+const QUERY_STOPWORDS = new Set([
+  'the', 'and', 'with', 'for', 'of', 'in', 'on', 'a', 'an', 'to', 'by', 'from', 'at', 'is', 'are', 'or',
+  'best', 'price', 'buy', 'online', 'new', 'original', 'genuine', 'official', 'shop', 'store',
+  'headphones', 'headphone', 'earbuds', 'earbud', 'earphones', 'earphone', 'speaker', 'speakers',
+  'case', 'cover', 'covers', 'charger', 'cable', 'bag', 'skin', 'guard', 'protector', 'sleeve',
+  'pair', 'pack', 'set', 'black', 'white', 'blue', 'red', 'green', 'silver', 'grey', 'gray', 'gold',
+])
+
+function significantTokens(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => {
+      if (!token || QUERY_STOPWORDS.has(token)) return false
+      if (token.length >= 3) return true
+      // Keep short model numbers like "15" / "24" — they are the exact
+      // tokens that distinguish an iPhone 15 from an iPhone 12.
+      return /^\d{2,}$/.test(token)
+    })
+}
+
+export function relevanceScore(query: string, title: string): number {
+  const tokens = significantTokens(query)
+  if (tokens.length === 0) return 1
+  // Compare space/punctuation-insensitively so "128 GB" matches "128gb".
+  const haystack = title.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  const hits = tokens.filter((token) => haystack.includes(token.replace(/[^a-z0-9]+/g, ''))).length
+  return hits / tokens.length
+}
+
+// Keeps only the offers that are most relevant to the query (within a tight
+// margin of the best score). Falls back to the full pool when nothing scores
+// well so a quirky title never empties the result set.
+export function filterByRelevance(query: string, offers: ShoppingOffer[]): ShoppingOffer[] {
+  if (offers.length === 0 || significantTokens(query).length === 0) return offers
+  const scored = offers.map((offer) => ({ offer, score: relevanceScore(query, offer.title) }))
+  const maxScore = Math.max(...scored.map((s) => s.score))
+  if (maxScore <= 0) return offers
+  const threshold = Math.max(0.55, maxScore - 0.2)
+  const relevant = scored.filter((s) => s.score >= threshold).map((s) => s.offer)
+  return relevant.length > 0 ? relevant : offers
+}
+
 // Picks the offer to track: valid price + resolvable link, same currency as
 // the product's existing currency (when known — prevents fake "drops" from
 // comparing ₹ against $), preferred merchants win, lowest price wins.
 export function selectOffer(
   offers: ShoppingOffer[],
   preferredCurrency?: string | null,
+  query?: string,
 ): ShoppingOffer | null {
-  const valid = offers.filter((offer) => offer.price > 0 && offer.link && offer.title)
+  const base = query ? filterByRelevance(query, offers) : offers
+  const valid = base.filter((offer) => offer.price > 0 && offer.link && offer.title)
 
   let currency: string
   if (preferredCurrency) {
