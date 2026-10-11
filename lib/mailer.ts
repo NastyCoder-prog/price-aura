@@ -45,8 +45,26 @@ export function verifyUnsubscribeToken(productId: number, email: string, token: 
   }
 }
 
-export function buildPriceDropEmail(to: string, product: ApiProduct): { subject: string; html: string } {
-  const subject = `Price dropped: ${product.title}`
+// Why an alert fired: a drop vs the last scan, a new all-time low, or the
+// price crossing the user's own alert price.
+export type AlertReason = 'price_drop' | 'all_time_low' | 'alert_price'
+
+const REASON_COPY: Record<AlertReason, { heading: string }> = {
+  price_drop: { heading: 'Price dropped' },
+  all_time_low: { heading: 'All-time low' },
+  alert_price: { heading: 'Price alert' },
+}
+
+export function buildPriceDropEmail(
+  to: string,
+  product: ApiProduct,
+  reason: AlertReason = 'price_drop',
+): { subject: string; html: string } {
+  const heading = REASON_COPY[reason].heading
+  const subject =
+    reason === 'price_drop'
+      ? `Price dropped: ${product.title}`
+      : `${heading}: ${product.title}`
   const token = unsubscribeToken(product.id, to)
   const unsubscribeUrl = token
     ? `${siteUrl()}/api/products/${product.id}/unsubscribe?email=${encodeURIComponent(to)}&token=${token}`
@@ -54,11 +72,18 @@ export function buildPriceDropEmail(to: string, product: ApiProduct): { subject:
   const changeHtml = product.change
     ? ` <span style="color:#16a34a">(${escapeHtml(product.change)})</span>`
     : ''
+  const reasonNote =
+    reason === 'all_time_low'
+      ? '<p style="color:#16a34a"><strong>This is the lowest price we have ever seen for this product.</strong></p>'
+      : reason === 'alert_price'
+        ? '<p style="color:#16a34a"><strong>It is at or below your alert price.</strong></p>'
+        : ''
 
   const html = `
     <div style="font-family:sans-serif;max-width:520px;margin:auto">
-      <h2 style="color:#0f766e">Price dropped</h2>
+      <h2 style="color:#0f766e">${escapeHtml(heading)}</h2>
       <p><strong>${escapeHtml(product.title)}</strong></p>
+      ${reasonNote}
       <p>Now <strong>${escapeHtml(product.price)}</strong>${changeHtml}</p>
       <p>Your alert price: ${escapeHtml(product.target)}</p>
       <p><a href="${escapeHtml(product.offerUrl || product.url)}">View product →</a></p>
@@ -74,8 +99,12 @@ export function buildPriceDropEmail(to: string, product: ApiProduct): { subject:
   return { subject, html }
 }
 
-export async function sendPriceDropEmail(to: string, product: ApiProduct): Promise<void> {
-  const { subject, html } = buildPriceDropEmail(to, product)
+export async function sendPriceDropEmail(
+  to: string,
+  product: ApiProduct,
+  reason: AlertReason = 'price_drop',
+): Promise<void> {
+  const { subject, html } = buildPriceDropEmail(to, product, reason)
 
   if (!RESEND_API_KEY) {
     // No key yet: pretend-sent, so the flow is still visible in the logs.

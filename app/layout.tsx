@@ -42,9 +42,28 @@ export const metadata: Metadata = {
 }
 
 export const viewport: Viewport = {
-  colorScheme: 'dark',
-  themeColor: '#080b0d',
+  colorScheme: 'dark light',
+  themeColor: [
+    { media: '(prefers-color-scheme: dark)', color: '#080b0d' },
+    { media: '(prefers-color-scheme: light)', color: '#f3f6f4' },
+  ],
 }
+
+// Applies the saved theme (or the OS preference) before first paint so the
+// page never flashes the wrong scheme.
+const themeBootstrap = `
+(function () {
+  try {
+    var saved = localStorage.getItem('priceaura-theme');
+    var theme = saved === 'light' || saved === 'dark'
+      ? saved
+      : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.setAttribute('data-theme', theme);
+  } catch (e) {
+    document.documentElement.setAttribute('data-theme', 'dark');
+  }
+})();
+`
 
 export default function RootLayout({
   children,
@@ -52,7 +71,10 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
+      </head>
       <body className="antialiased">
         {children}
         {process.env.NODE_ENV === 'production' && <Analytics />}

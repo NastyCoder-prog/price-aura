@@ -17,6 +17,7 @@ import { detectCurrency, parsePrice, type Currency } from './price'
 import { storeLabel } from './parsers'
 import { searchBing } from './bing'
 import { searchSerpApi, serpApiAvailable } from './serpapi'
+import { searchBrightData, brightDataAvailable } from './brightdata'
 import { makeDeadline, paceAggregator } from './pace'
 
 export interface ShoppingOffer {
@@ -355,11 +356,13 @@ async function searchGoogle(
   throw blockError()
 }
 
-// Orchestrates the aggregate search across sources, free-first:
-//   1. Bing Shopping — free, unlimited, server-rendered HTML
-//   2. SerpAPI (optional key, ~100 free searches/mo) — real Google Shopping
+// Orchestrates the aggregate search across sources:
+//   1. Bright Data SERP (optional key) — one Google Shopping request returns
+//      live listings from every store at once, geo-tagged gl=in
+//   2. Bing Shopping — free, unlimited, server-rendered HTML
+//   3. SerpAPI (optional key, ~100 free searches/mo) — real Google Shopping
 //      JSON incl. Amazon/Flipkart listings
-//   3. Google Shopping direct/proxies (free) + paid render APIs (optional keys)
+//   4. Google Shopping direct/proxies (free) + paid render APIs (optional keys)
 export async function searchShopping(
   query: string,
   options: { batch?: boolean; preferredCurrency?: string | null } = {},
@@ -367,24 +370,36 @@ export async function searchShopping(
   searchUrl: string
   offers: ShoppingOffer[]
   best: ShoppingOffer
-  source: 'bing' | 'serpapi' | 'google'
+  source: 'brightdata' | 'bing' | 'serpapi' | 'google'
 }> {
   const deadline = makeDeadline(50_000)
   let currencyError: ApiError | null = null
 
-  // ---- Source 1: Bing Shopping --------------------------------------------
+  // ---- Source 1: Bright Data SERP — Google Shopping JSON (gl=in) ----------
+  if (brightDataAvailable() && !deadline()) {
+    try {
+      const { searchUrl, offers } = await searchBrightData(query, { batch: options.batch })
+      const best = selectOffer(offers, options.preferredCurrency, query)
+      if (best) return { searchUrl, offers, best, source: 'brightdata' }
+      currencyError = noOffersError()
+    } catch (error) {
+      console.warn(`[scraper] brightdata source failed: ${(error as Error).message}`)
+    }
+  }
+
+  // ---- Source 2: Bing Shopping --------------------------------------------
   try {
     const { searchUrl, offers } = await searchBing(query, { ...options, deadline })
     const best = selectOffer(offers, options.preferredCurrency, query)
     if (best) return { searchUrl, offers, best, source: 'bing' }
     // Offers exist but none match the tracked currency — try the other
     // sources too before giving up.
-    currencyError = noOffersError()
+    currencyError ??= noOffersError()
   } catch (error) {
     console.warn(`[scraper] bing source failed: ${(error as Error).message}`)
   }
 
-  // ---- Source 2: SerpAPI google_shopping (optional key) -------------------
+  // ---- Source 3: SerpAPI google_shopping (optional key) -------------------
   if (serpApiAvailable() && !deadline()) {
     try {
       const { searchUrl, offers } = await searchSerpApi(query, { batch: options.batch })
@@ -396,7 +411,7 @@ export async function searchShopping(
     }
   }
 
-  // ---- Source 3: Google Shopping direct / proxies / render APIs -----------
+  // ---- Source 4: Google Shopping direct / proxies / render APIs -----------
   if (!deadline()) {
     try {
       const { searchUrl, offers } = await searchGoogle(query, { ...options, deadline })

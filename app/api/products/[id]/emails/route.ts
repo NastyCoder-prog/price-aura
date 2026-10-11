@@ -1,10 +1,11 @@
 // app/api/products/[id]/emails/route.ts
-// POST /api/products/:id/emails -> tag an email onto a product
+// POST /api/products/:id/emails -> tag an alert email onto your product
 
 import { NextRequest, NextResponse } from 'next/server'
 import { classifyError } from '@/lib/api-error'
-import { addEmail, getProduct } from '@/lib/db'
+import { addEmail, getOwnedProduct } from '@/lib/db'
 import { clientIp, rateLimit } from '@/lib/ratelimit'
+import { currentUser } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
 
@@ -20,18 +21,27 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   }
 
   try {
+    const user = await currentUser(request)
+    if (!user) {
+      return NextResponse.json(
+        { error: { code: 'auth_required', message: 'Please sign in to manage your watchlist.' } },
+        { status: 401 },
+      )
+    }
+
     const { id } = await context.params
     const productId = Number(id)
     if (!Number.isInteger(productId) || productId <= 0) {
       return NextResponse.json({ error: { code: 'bad_id', message: 'Unknown product.' } }, { status: 400 })
     }
 
-    const product = await getProduct(productId)
-    if (!product)
+    const product = await getOwnedProduct(productId, user.id)
+    if (!product) {
       return NextResponse.json(
         { error: { code: 'not_found', message: 'Product not found.' } },
         { status: 404 },
       )
+    }
 
     const body = (await request.json().catch(() => ({}))) as { email?: unknown }
     const email = String(body.email ?? '')

@@ -11,6 +11,7 @@ import {
   Flame,
   Link2,
   Loader2,
+  LogOut,
   Pencil,
   Plus,
   Search,
@@ -20,6 +21,10 @@ import {
   X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { OfferCard } from '@/components/offer-card'
+import { StoreMark, storeLabel } from '@/components/store-mark'
+import { ThemeToggle } from '@/components/theme-toggle'
+import type { CompareOffer } from '@/lib/compare'
 import { formatPrice } from '@/lib/scraper/price'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '/api'
@@ -42,8 +47,12 @@ type Product = {
   checkIntervalHours: number
 }
 
+type User = { id: number; email: string; name: string | null }
+
 type HistoryPoint = { priceValue: number; price: string; checkedAt: string }
 type Notice = { text: string; tone: 'ok' | 'error' }
+
+type SearchResults = { query: string; source: string; offers: CompareOffer[] }
 
 const FREQUENCIES = [
   { hours: 1, label: 'Every hour' },
@@ -51,43 +60,6 @@ const FREQUENCIES = [
   { hours: 12, label: 'Every 12 hours' },
   { hours: 24, label: 'Every 24 hours' },
 ]
-
-const STORE_LABELS: Record<string, string> = {
-  amazon: 'Amazon',
-  flipkart: 'Flipkart',
-  myntra: 'Myntra',
-  ajio: 'Ajio',
-  nykaa: 'Nykaa',
-  croma: 'Croma',
-  meesho: 'Meesho',
-  snapdeal: 'Snapdeal',
-  shopclues: 'ShopClues',
-  reliancedigital: 'Reliance Digital',
-  walmart: 'Walmart',
-  ebay: 'eBay',
-  bestbuy: 'Best Buy',
-  target: 'Target',
-  costco: 'Costco',
-  homedepot: 'Home Depot',
-  aliexpress: 'AliExpress',
-  alibaba: 'Alibaba',
-  etsy: 'Etsy',
-  rakuten: 'Rakuten',
-  ikea: 'IKEA',
-  zara: 'Zara',
-}
-
-function storeLabel(store: string) {
-  return STORE_LABELS[store] ?? store.charAt(0).toUpperCase() + store.slice(1)
-}
-
-function StoreMark({ store }: { store: string }) {
-  return (
-    <span className={`store-mark ${store}`} aria-label={storeLabel(store)}>
-      {store.charAt(0).toUpperCase()}
-    </span>
-  )
-}
 
 async function readErrorMessage(response: Response): Promise<string> {
   const body = (await response.json().catch(() => null)) as { error?: string | { message?: string } } | null
@@ -134,7 +106,6 @@ function Sparkline({ points, currency }: { points: HistoryPoint[]; currency: str
         <polyline
           points={coords.join(' ')}
           fill="none"
-          stroke="#c5f36b"
           strokeWidth="1.5"
           vectorEffect="non-scaling-stroke"
         />
@@ -442,25 +413,93 @@ function ProductCard({
   )
 }
 
+function AccountMenu({
+  user,
+  onSignedOut,
+}: {
+  user: User
+  onSignedOut: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function onDown(event: MouseEvent) {
+      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  async function signOut() {
+    try {
+      await fetch(`${API_BASE}/auth/logout`, { method: 'POST' })
+    } finally {
+      setOpen(false)
+      onSignedOut()
+    }
+  }
+
+  const initial = (user.name || user.email).trim().charAt(0).toUpperCase()
+
+  return (
+    <div className="account-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className="account-chip"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        <span className="account-avatar">{initial}</span>
+        {user.name || user.email.split('@')[0]}
+        <ChevronDown aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="account-menu" role="menu">
+          <p>{user.email}</p>
+          <button type="button" role="menuitem" className="menu-item" onClick={signOut}>
+            <LogOut aria-hidden="true" /> Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Page() {
   const [mode, setMode] = useState<'search' | 'link'>('search')
   const [input, setInput] = useState('')
   const [email, setEmail] = useState('')
   const [frequency, setFrequency] = useState(6)
   const [products, setProducts] = useState<Product[]>([])
+  const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busy, setBusy] = useState(false)
+  const [comparing, setComparing] = useState(false)
+  const [results, setResults] = useState<SearchResults | null>(null)
+  const [trackingOffer, setTrackingOffer] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     fetch(`${API_BASE}/products`)
       .then(async (response) => {
         if (!response.ok) throw new Error(await readErrorMessage(response))
-        return (await response.json()) as { products: Product[] }
+        return (await response.json()) as { products: Product[]; user: User | null }
       })
       .then((data) => {
-        if (!cancelled) setProducts(data.products ?? [])
+        if (cancelled) return
+        setProducts(data.products ?? [])
+        setUser(data.user ?? null)
       })
       .catch((error: Error) => {
         if (!cancelled) setNotice({ text: error.message, tone: 'error' })
@@ -480,7 +519,26 @@ export default function Page() {
     .sort()
     .at(-1) as string | undefined
 
-  async function startTracking(event: FormEvent<HTMLFormElement>) {
+  async function trackProduct(payload: Record<string, unknown>): Promise<Product | null> {
+    const response = await fetch(`${API_BASE}/products`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, email: email.trim() || undefined, frequency }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { product?: Product }
+    if (!response.ok || !data.product) {
+      setNotice({ text: await readErrorMessage(response), tone: 'error' })
+      return null
+    }
+    const saved = data.product
+    setProducts((current) => [
+      saved,
+      ...current.filter((product) => product.id !== saved.id && product.url !== saved.url),
+    ])
+    return saved
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const value = input.trim()
     if (!value) {
@@ -496,44 +554,81 @@ export default function Page() {
       return
     }
 
-    setBusy(true)
+    if (mode === 'link') {
+      if (!user) {
+        setNotice({ text: 'Sign in to start tracking products.', tone: 'error' })
+        return
+      }
+      setBusy(true)
+      setNotice({ text: 'Scanning the live product page… this can take a few seconds.', tone: 'ok' })
+      try {
+        const saved = await trackProduct({ url: value })
+        if (saved) {
+          setInput('')
+          setEmail('')
+          setNotice({
+            text: `Now tracking “${saved.title}” at ${saved.price} · checked every ${saved.checkIntervalHours}h`,
+            tone: 'ok',
+          })
+        }
+      } catch {
+        setNotice({ text: 'Could not reach the server. Please try again.', tone: 'error' })
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
+
+    // Search mode: run the unified comparison across every store.
+    setComparing(true)
+    setResults(null)
     setNotice({
-      text:
-        mode === 'search'
-          ? 'Searching live listings across major stores… this can take a few seconds.'
-          : 'Scanning the live product page… this can take a few seconds.',
+      text: 'Comparing live prices across stores… this can take a few seconds.',
       tone: 'ok',
     })
-
     try {
-      const payload = mode === 'search' ? { query: value } : { url: value }
-      const response = await fetch(`${API_BASE}/products`, {
+      const response = await fetch(`${API_BASE}/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...payload, email: email.trim() || undefined, frequency }),
+        body: JSON.stringify({ query: value }),
       })
-      const data = (await response.json().catch(() => ({}))) as { product?: Product }
-
-      if (!response.ok || !data.product) {
+      const data = (await response.json().catch(() => ({}))) as {
+        offers?: CompareOffer[]
+        query?: string
+        source?: string
+      }
+      if (!response.ok || !data.offers || data.offers.length === 0) {
         setNotice({ text: await readErrorMessage(response), tone: 'error' })
         return
       }
-
-      const saved = data.product
-      setProducts((current) => [
-        saved,
-        ...current.filter((product) => product.id !== saved.id && product.url !== saved.url),
-      ])
-      setInput('')
-      setEmail('')
-      setNotice({
-        text: `Now tracking “${saved.title}” at ${saved.price} · checked every ${saved.checkIntervalHours}h`,
-        tone: 'ok',
-      })
+      setResults({ query: data.query ?? value, source: data.source ?? 'search', offers: data.offers })
+      setNotice(null)
     } catch {
       setNotice({ text: 'Could not reach the server. Please try again.', tone: 'error' })
     } finally {
-      setBusy(false)
+      setComparing(false)
+    }
+  }
+
+  async function trackOffer(offer: CompareOffer) {
+    if (!user) {
+      setNotice({ text: 'Sign in to track this product and get price alerts.', tone: 'error' })
+      return
+    }
+    setTrackingOffer(offer.link)
+    try {
+      const saved = await trackProduct({ url: offer.link })
+      if (saved) {
+        setEmail('')
+        setNotice({
+          text: `Now tracking “${saved.title}” at ${saved.price} from ${saved.store}.`,
+          tone: 'ok',
+        })
+      }
+    } catch {
+      setNotice({ text: 'Could not reach the server. Please try again.', tone: 'error' })
+    } finally {
+      setTrackingOffer(null)
     }
   }
 
@@ -556,6 +651,24 @@ export default function Page() {
               ? `${products.length} product${products.length === 1 ? '' : 's'} monitored`
               : 'Ready to track'}
           </div>
+          <ThemeToggle />
+          {user ? (
+            <AccountMenu
+              user={user}
+              onSignedOut={() => {
+                setUser(null)
+                setProducts([])
+                setResults(null)
+              }}
+            />
+          ) : (
+            <Link href="/login" className="account-chip">
+              <span className="account-avatar">
+                <Plus aria-hidden="true" style={{ width: 12, height: 12 }} />
+              </span>
+              Sign in
+            </Link>
+          )}
           <Button
             className="premium-button"
             onClick={() => document.getElementById('track')?.scrollIntoView({ behavior: 'smooth' })}
@@ -577,8 +690,8 @@ export default function Page() {
               <em>again.</em>
             </h1>
             <p>
-              Search any product and PriceAura watches live listings across Amazon, Flipkart, Walmart, eBay
-              and more — so you can buy at the right moment.
+              Search any product and PriceAura compares live listings across Amazon, Flipkart, Walmart, eBay
+              and more — then watches the price for you.
             </p>
           </div>
           <div className="hero-stat">
@@ -597,11 +710,14 @@ export default function Page() {
         <div className="section-label">
           <span className="number-label">01</span>
           <div>
-            <h2 id="track-heading">Track a new product</h2>
-            <p>Search by name to compare live offers, or paste a direct product link.</p>
+            <h2 id="track-heading">Search & compare</h2>
+            <p>
+              Search by name to compare live offers across stores, or paste a direct product link to start
+              tracking it.
+            </p>
           </div>
         </div>
-        <form className="tracking-form" onSubmit={startTracking}>
+        <form className="tracking-form" onSubmit={handleSubmit}>
           <div className="mode-toggle" role="tablist" aria-label="Tracking mode">
             <button
               type="button"
@@ -646,13 +762,13 @@ export default function Page() {
             </select>
             <ChevronDown aria-hidden="true" />
           </label>
-          <Button type="submit" className="start-button" disabled={busy}>
-            {busy ? (
+          <Button type="submit" className="start-button" disabled={busy || comparing}>
+            {busy || comparing ? (
               <Loader2 className="spin" data-icon="inline-start" aria-hidden="true" />
             ) : (
               <Plus data-icon="inline-start" />
             )}
-            {busy ? 'Tracking…' : 'Start tracking'}
+            {comparing ? 'Comparing…' : busy ? 'Tracking…' : mode === 'search' ? 'Compare prices' : 'Start tracking'}
           </Button>
           <label className="email-field">
             <BellRing aria-hidden="true" />
@@ -670,7 +786,7 @@ export default function Page() {
             <Check aria-hidden="true" /> Compares Amazon, Flipkart, Walmart, eBay &amp; more
           </span>
           <span>
-            <Flame aria-hidden="true" /> Email alerts on price drops
+            <Flame aria-hidden="true" /> Email alerts on price drops &amp; all-time lows
           </span>
           {notice && (
             <span className={`notice ${notice.tone === 'error' ? 'error' : ''}`} role="status">
@@ -680,10 +796,44 @@ export default function Page() {
         </div>
       </section>
 
+      {results && (
+        <section className="compare-panel" aria-labelledby="compare-heading">
+          <div className="section-label">
+            <span className="number-label">02</span>
+            <div>
+              <h2 id="compare-heading">Price comparison</h2>
+              <p>
+                Live offers for “<strong>{results.query}</strong>”, cheapest first.
+              </p>
+            </div>
+          </div>
+          <div className="compare-meta">
+            <span className="source-pill">
+              <Sparkles aria-hidden="true" /> {results.source}
+            </span>
+            <span>
+              <strong>{results.offers.length}</strong> store
+              {results.offers.length === 1 ? '' : 's'} found
+            </span>
+            {!user && (
+              <div className="signin-nudge">
+                <span>Sign in to track any of these offers and get alerted when the price drops.</span>
+                <Link href="/login">Sign in</Link>
+              </div>
+            )}
+          </div>
+          <div className="offer-grid">
+            {results.offers.map((offer) => (
+              <OfferCard key={offer.link} offer={offer} tracking={trackingOffer} onTrack={trackOffer} />
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="products-section" aria-labelledby="products-heading">
         <div className="products-header">
           <div className="section-label">
-            <span className="number-label">02</span>
+            <span className="number-label">{results ? '03' : '02'}</span>
             <div>
               <h2 id="products-heading">Currently tracked products</h2>
               <p>Your watchlist, all in one calm place.</p>
@@ -715,11 +865,18 @@ export default function Page() {
         ) : products.length === 0 ? (
           <div className="empty-state">
             <Sparkles aria-hidden="true" />
-            <h3>Nothing tracked yet</h3>
+            <h3>{user ? 'Nothing tracked yet' : 'Your watchlist lives here'}</h3>
             <p>
-              Search for any product above — we compare live offers across major stores and alert you when the
-              price drops.
+              {user
+                ? 'Search for any product above — we compare live offers across major stores and alert you when the price drops.'
+                : 'Sign in to track products, get email alerts on price drops and all-time lows, and keep your watchlist in one place.'}
             </p>
+            {!user && (
+              <div className="signin-nudge">
+                <span>It takes a few seconds to create an account.</span>
+                <Link href="/login">Create account</Link>
+              </div>
+            )}
           </div>
         ) : (
           <div className="products-grid">

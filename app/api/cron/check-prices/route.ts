@@ -11,9 +11,9 @@
 //   - Google Shopping requests are spaced 3–7 seconds apart (batch mode)
 
 import { NextRequest, NextResponse } from 'next/server'
-import { listDueProducts, saveProduct, type ApiProduct } from '@/lib/db'
+import { listDueProducts, priceWatchStats, saveProduct, type ApiProduct } from '@/lib/db'
 import { scrapeProduct, errorStatus } from '@/lib/scraper'
-import { sendPriceDropEmail } from '@/lib/mailer'
+import { sendPriceDropEmail, type AlertReason } from '@/lib/mailer'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60 // highest value allowed on all Vercel plans
@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
   const due = await listDueProducts(BATCH_SIZE)
   const startedAt = Date.now()
 
-  const stats = { updated: 0, dropped: 0, failed: 0, emailed: 0, skipped: 0 }
+  const stats = { updated: 0, alerted: 0, dropped: 0, failed: 0, emailed: 0, skipped: 0 }
 
   let cursor = 0
 
@@ -64,6 +64,7 @@ export async function GET(request: NextRequest) {
     scanned: due.length - stats.skipped,
     due: due.length,
     updated: stats.updated,
+    alerted: stats.alerted,
     dropped: stats.dropped,
     failed: stats.failed,
     emailed: stats.emailed,
@@ -74,28 +75,51 @@ export async function GET(request: NextRequest) {
   return NextResponse.json(summary)
 }
 
+// Email when the scan is worth acting on: a drop vs the last scan, a brand
+// new all-time low, or the price crossing the user's own alert price.
+function alertReasonFor(
+  product: ApiProduct,
+  watch: { isAllTimeLow: boolean; atOrBelowTarget: boolean },
+): AlertReason | null {
+  if (watch.isAllTimeLow) return 'all_time_low'
+  if (watch.atOrBelowTarget) return 'alert_price'
+  if (product.status === 'Price Dropped!') return 'price_drop'
+  return null
+}
+
 async function checkOne(
   product: ApiProduct,
-  stats: { updated: number; dropped: number; failed: number; emailed: number },
+  stats: {
+    updated: number
+    alerted: number
+    dropped: number
+    failed: number
+    emailed: number
+  },
 ) {
   try {
     const scraped = await scrapeProduct(product.url, {
-      batch: true, // human-paced Google requests
+      batch: true, // human-paced aggregator requests
       preferredCurrency: product.currency,
     })
-    const saved = await saveProduct(scraped)
+    // matchId: re-scrape the exact row (per-owner), not "whoever owns this URL"
+    const saved = await saveProduct(scraped, { matchId: product.id })
     stats.updated += 1
 
-    if (saved.status === 'Price Dropped!') {
-      stats.dropped += 1
-      console.log(`[cron] ${saved.title} -> ${saved.price} (${saved.change})`)
-      for (const email of saved.emails) {
-        try {
-          await sendPriceDropEmail(email, saved)
-          stats.emailed += 1
-        } catch (mailError) {
-          console.error(`[cron] email to ${email} failed:`, (mailError as Error).message)
-        }
+    const watch = await priceWatchStats(saved.id, saved.priceValue, saved.targetValue)
+    const reason = alertReasonFor(saved, watch)
+    if (!reason) return
+
+    stats.alerted += 1
+    if (saved.status === 'Price Dropped!') stats.dropped += 1
+    console.log(`[cron] ${saved.title} -> ${saved.price} (${reason}${saved.change ? ` ${saved.change}` : ''})`)
+
+    for (const email of saved.emails) {
+      try {
+        await sendPriceDropEmail(email, saved, reason)
+        stats.emailed += 1
+      } catch (mailError) {
+        console.error(`[cron] email to ${email} failed:`, (mailError as Error).message)
       }
     }
   } catch (error) {

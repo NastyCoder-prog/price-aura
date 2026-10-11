@@ -87,16 +87,25 @@ function toApiProduct(row: ProductRow): ApiProduct {
   }
 }
 
-export async function listProducts(options: { withEmails?: boolean } = {}): Promise<ApiProduct[]> {
+export async function listProducts(
+  options: { withEmails?: boolean; userId?: number } = {},
+): Promise<ApiProduct[]> {
+  // Fail closed: without an owner id nothing is returned.
+  const owner = options.userId ?? null
   const rows = options.withEmails
     ? await db()<ProductRow[]>`
         select p.*, coalesce(array_agg(e.email) filter (where e.id is not null), '{}') as emails
         from products p
         left join product_emails e on e.product_id = p.id
+        where p.user_id = ${owner}
         group by p.id
         order by p.id desc
       `
-    : await db()<ProductRow[]>`select p.*, '{}'::text[] as emails from products p order by p.id desc`
+    : await db()<ProductRow[]>`
+        select p.*, '{}'::text[] as emails from products p
+        where p.user_id = ${owner}
+        order by p.id desc
+      `
   return rows.map(toApiProduct)
 }
 
@@ -132,15 +141,34 @@ export async function getProduct(
   return rows[0] ? toApiProduct(rows[0]) : null
 }
 
-export async function getProductByUrl(url: string): Promise<ApiProduct | null> {
-  const rows = await db()<
-    ProductRow[]
-  >`select p.*, '{}'::text[] as emails from products p where p.url = ${url}`
+// The caller's own copy of a product — every management route loads through
+// this so nobody can touch another account's watchlist.
+export async function getOwnedProduct(id: number, userId: number): Promise<ApiProduct | null> {
+  const rows = await db()<ProductRow[]>`
+    select p.*, '{}'::text[] as emails from products p
+    where p.id = ${id} and p.user_id = ${userId}
+  `
+  return rows[0] ? toApiProduct(rows[0]) : null
+}
+
+export async function getProductByUrl(url: string, userId?: number): Promise<ApiProduct | null> {
+  const rows =
+    userId === undefined
+      ? await db()<ProductRow[]>`select p.*, '{}'::text[] as emails from products p where p.url = ${url}`
+      : await db()<ProductRow[]>`
+          select p.*, '{}'::text[] as emails from products p
+          where p.url = ${url} and p.user_id = ${userId}
+        `
   return rows[0] ? toApiProduct(rows[0]) : null
 }
 
 export interface SaveProductOptions {
   checkIntervalHours?: number
+  // Owner of the tracked product. Set when a signed-in user starts tracking.
+  userId?: number | null
+  // Re-scrape of an existing row (cron): resolve it by primary key instead
+  // of by URL so every owner's copy updates independently.
+  matchId?: number | null
 }
 
 // Insert or update a freshly scraped product, record the price in history,
@@ -152,9 +180,21 @@ export async function saveProduct(
   const sql = db()
 
   const id = await sql.begin(async (tx) => {
-    const existing = await tx<{ id: number; price_value: number; target_value: number; currency: string }[]>`
-      select id, price_value, target_value, currency from products where url = ${scraped.url}
-    `
+    // Row lookup: re-scrapes (cron) match by primary key; interactive saves
+    // match the same URL within the same owner's watchlist.
+    const existing = options.matchId
+      ? await tx<{ id: number; price_value: number; target_value: number; currency: string }[]>`
+          select id, price_value, target_value, currency from products where id = ${options.matchId}
+        `
+      : options.userId
+        ? await tx<{ id: number; price_value: number; target_value: number; currency: string }[]>`
+            select id, price_value, target_value, currency from products
+            where url = ${scraped.url} and user_id = ${options.userId}
+          `
+        : await tx<{ id: number; price_value: number; target_value: number; currency: string }[]>`
+            select id, price_value, target_value, currency from products
+            where url = ${scraped.url} and user_id is null
+          `
 
     let status = 'Monitoring'
     let lastChange: string | null = null
@@ -207,10 +247,10 @@ export async function saveProduct(
     } else {
       const inserted = await tx<{ id: number }[]>`
         insert into products (url, title, store, image, price_value, target_value, currency, offer_url,
-                              status, last_change, scanned_at, check_interval_hours)
+                              status, last_change, scanned_at, check_interval_hours, user_id)
         values (${scraped.url}, ${scraped.title}, ${scraped.store}, ${scraped.image},
                 ${scraped.priceValue}, ${targetValue}, ${scraped.currency}, ${scraped.offerUrl},
-                ${status}, ${lastChange}, ${scraped.scannedAt}, ${interval})
+                ${status}, ${lastChange}, ${scraped.scannedAt}, ${interval}, ${options.userId ?? null})
         returning id
       `
       productId = inserted[0].id
@@ -236,16 +276,31 @@ export function normalizeInterval(value: unknown): number {
   return (ALLOWED_INTERVALS as readonly number[]).includes(numeric) ? numeric : 6
 }
 
-export async function updateProductTarget(id: number, targetValue: number): Promise<ApiProduct | null> {
-  await db()`
-    update products set target_value = ${targetValue}, status = 'Monitoring', last_change = null
-    where id = ${id}
-  `
+export async function updateProductTarget(
+  id: number,
+  targetValue: number,
+  userId?: number,
+): Promise<ApiProduct | null> {
+  if (userId === undefined) {
+    await db()`
+      update products set target_value = ${targetValue}, status = 'Monitoring', last_change = null
+      where id = ${id}
+    `
+  } else {
+    await db()`
+      update products set target_value = ${targetValue}, status = 'Monitoring', last_change = null
+      where id = ${id} and user_id = ${userId}
+    `
+  }
   return getProduct(id)
 }
 
-export async function deleteProduct(id: number): Promise<void> {
-  await db()`delete from products where id = ${id}`
+export async function deleteProduct(id: number, userId?: number): Promise<void> {
+  if (userId === undefined) {
+    await db()`delete from products where id = ${id}`
+  } else {
+    await db()`delete from products where id = ${id} and user_id = ${userId}`
+  }
 }
 
 export async function addEmail(productId: number, email: string): Promise<void> {
@@ -285,6 +340,106 @@ export async function priceHistory(productId: number, limit = 50): Promise<Price
       checkedAt: new Date(row.checked_at).toISOString(),
     }
   })
+}
+
+export interface ApiUser {
+  id: number
+  email: string
+  name: string | null
+}
+
+interface UserRow {
+  id: number
+  email: string
+  name: string | null
+  password_hash?: string
+}
+
+// ---- Accounts -------------------------------------------------------------
+
+// Creates an account. Returns null when the email is already registered so
+// the route can answer "email already in use" without leaking anything else.
+export async function createUser(input: {
+  email: string
+  passwordHash: string
+  name?: string | null
+}): Promise<ApiUser | null> {
+  const rows = await db()<
+    UserRow[]
+  >`insert into users (email, password_hash, name)
+    values (${input.email}, ${input.passwordHash}, ${input.name ?? null})
+    on conflict (email) do nothing
+    returning id, email, name`
+  return rows[0] ? { id: Number(rows[0].id), email: rows[0].email, name: rows[0].name } : null
+}
+
+export async function getUserAuth(email: string): Promise<(ApiUser & { passwordHash: string }) | null> {
+  const rows = await db()<UserRow[]>`
+    select id, email, name, password_hash from users where email = ${email}
+  `
+  const row = rows[0]
+  if (!row) return null
+  return {
+    id: Number(row.id),
+    email: row.email,
+    name: row.name,
+    passwordHash: row.password_hash ?? '',
+  }
+}
+
+// Sessions store only a hash of the cookie token.
+export async function createSession(tokenHash: string, userId: number, expiresAt: Date): Promise<void> {
+  await db()`
+    insert into sessions (token_hash, user_id, expires_at) values (${tokenHash}, ${userId}, ${expiresAt})
+  `
+}
+
+export async function getSessionUser(tokenHash: string): Promise<ApiUser | null> {
+  if (!tokenHash) return null
+  const rows = await db()<UserRow[]>`
+    select u.id, u.email, u.name
+    from sessions s
+    join users u on u.id = s.user_id
+    where s.token_hash = ${tokenHash} and s.expires_at > now()
+  `
+  const row = rows[0]
+  return row ? { id: Number(row.id), email: row.email, name: row.name } : null
+}
+
+export async function deleteSession(tokenHash: string): Promise<void> {
+  if (!tokenHash) return
+  await db()`delete from sessions where token_hash = ${tokenHash}`
+}
+
+// Alert helpers for the cron. `previousLow` is the cheapest price recorded
+// BEFORE the scan that just landed, so "all-time low" means a genuinely new
+// record — not "the price is unchanged since last time".
+export interface PriceWatchStats {
+  previousLow: number | null
+  isAllTimeLow: boolean
+  atOrBelowTarget: boolean
+}
+
+export async function priceWatchStats(
+  productId: number,
+  priceValue: number,
+  targetValue: number,
+): Promise<PriceWatchStats> {
+  const rows = await db()<
+    { previous_low: string | number | null }[]
+  >`
+    select min(h.price_value) as previous_low
+    from price_history h
+    where h.product_id = ${productId}
+      and h.id < (select max(h2.id) from price_history h2 where h2.product_id = ${productId})
+  `
+  const raw = rows[0]?.previous_low
+  const previousLow = raw === null || raw === undefined ? null : Number(raw)
+  return {
+    previousLow,
+    isAllTimeLow: previousLow !== null && priceValue < previousLow,
+    atOrBelowTarget: targetValue > 0 && priceValue <= targetValue,
+  }
 }
 
 export async function pingDb(): Promise<void> {

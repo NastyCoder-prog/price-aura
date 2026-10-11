@@ -4,14 +4,29 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { classifyError } from '@/lib/api-error'
-import { deleteProduct, getProduct, updateProductTarget } from '@/lib/db'
+import { deleteProduct, getOwnedProduct, updateProductTarget } from '@/lib/db'
 import { clientIp, rateLimit } from '@/lib/ratelimit'
+import { currentUser } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
 
 function errorResponse(scope: string, error: unknown) {
   const { message, status, code } = classifyError(scope, error)
   return NextResponse.json({ error: { code, message } }, { status })
+}
+
+function authRequired() {
+  return NextResponse.json(
+    { error: { code: 'auth_required', message: 'Please sign in to manage your watchlist.' } },
+    { status: 401 },
+  )
+}
+
+function notFound() {
+  return NextResponse.json(
+    { error: { code: 'not_found', message: 'Product not found.' } },
+    { status: 404 },
+  )
 }
 
 async function guard(request: NextRequest) {
@@ -25,14 +40,22 @@ async function guard(request: NextRequest) {
   return null
 }
 
+function parseId(raw: string): number | null {
+  const productId = Number(raw)
+  return Number.isInteger(productId) && productId > 0 ? productId : null
+}
+
 export async function PATCH(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const blocked = await guard(request)
   if (blocked) return blocked
 
   try {
+    const user = await currentUser(request)
+    if (!user) return authRequired()
+
     const { id } = await context.params
-    const productId = Number(id)
-    if (!Number.isInteger(productId) || productId <= 0) {
+    const productId = parseId(id)
+    if (!productId) {
       return NextResponse.json({ error: { code: 'bad_id', message: 'Unknown product.' } }, { status: 400 })
     }
 
@@ -45,12 +68,8 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       )
     }
 
-    const product = await updateProductTarget(productId, Math.round(targetValue * 100) / 100)
-    if (!product)
-      return NextResponse.json(
-        { error: { code: 'not_found', message: 'Product not found.' } },
-        { status: 404 },
-      )
+    const product = await updateProductTarget(productId, Math.round(targetValue * 100) / 100, user.id)
+    if (!product) return notFound()
     return NextResponse.json({ product })
   } catch (error) {
     return errorResponse('api/products/patch', error)
@@ -62,20 +81,19 @@ export async function DELETE(request: NextRequest, context: { params: Promise<{ 
   if (blocked) return blocked
 
   try {
+    const user = await currentUser(request)
+    if (!user) return authRequired()
+
     const { id } = await context.params
-    const productId = Number(id)
-    if (!Number.isInteger(productId) || productId <= 0) {
+    const productId = parseId(id)
+    if (!productId) {
       return NextResponse.json({ error: { code: 'bad_id', message: 'Unknown product.' } }, { status: 400 })
     }
 
-    const product = await getProduct(productId)
-    if (!product)
-      return NextResponse.json(
-        { error: { code: 'not_found', message: 'Product not found.' } },
-        { status: 404 },
-      )
+    const product = await getOwnedProduct(productId, user.id)
+    if (!product) return notFound()
 
-    await deleteProduct(productId)
+    await deleteProduct(productId, user.id)
     return NextResponse.json({ ok: true })
   } catch (error) {
     return errorResponse('api/products/delete', error)

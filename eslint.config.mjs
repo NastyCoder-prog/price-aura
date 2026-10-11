@@ -8,6 +8,7 @@ const config = [
   ...nextCoreWebVitals,
   ...nextTypescript,
   {
+    files: ['**/*.{js,jsx,mjs,ts,tsx,mts,cts}'],
     rules: {
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       '@next/next/no-img-element': 'off',

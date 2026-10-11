@@ -3,6 +3,22 @@
 -- Safe to re-run: every statement is idempotent (fresh installs AND upgrades
 -- from the original integer-price schema both work).
 
+create table if not exists users (
+  id bigint generated always as identity primary key,
+  email text not null unique,
+  password_hash text not null,
+  name text,
+  created_at timestamptz not null default now()
+);
+
+-- Sessions store only a HASH of the cookie token (see lib/auth.ts).
+create table if not exists sessions (
+  token_hash text primary key,
+  user_id bigint not null references users(id) on delete cascade,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists products (
   id bigint generated always as identity primary key,
   url text not null unique,
@@ -17,6 +33,7 @@ create table if not exists products (
   last_change text,
   scanned_at timestamptz,
   check_interval_hours integer not null default 6,
+  user_id bigint references users(id) on delete cascade,
   created_at timestamptz not null default now()
 );
 
@@ -41,6 +58,16 @@ alter table price_history alter column price_value type numeric(14,2) using pric
 alter table products add column if not exists currency text not null default 'INR';
 alter table products add column if not exists offer_url text;
 alter table products add column if not exists check_interval_hours integer not null default 6;
+
+-- Accounts: a product's URL is unique PER OWNER, not globally, so two people
+-- can watch the same product. Older databases had a global unique on url —
+-- drop it and replace with the per-user index.
+alter table products add column if not exists user_id bigint references users(id) on delete cascade;
+alter table products drop constraint if exists products_url_key;
+create unique index if not exists products_user_url_idx on products (user_id, url);
+create index if not exists products_user_idx on products (user_id, id desc);
+create index if not exists sessions_user_idx on sessions (user_id);
+create index if not exists sessions_expiry_idx on sessions (expires_at);
 
 create index if not exists price_history_product_idx on price_history (product_id, id desc);
 create index if not exists products_scanned_idx on products (scanned_at asc nulls first);

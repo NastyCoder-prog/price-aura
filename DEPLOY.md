@@ -70,6 +70,8 @@ Set these under _Settings → Environment Variables_ for **Production** and
 | `RESEND_API_KEY`                                      | recommended | Resend API key. If unset, emails are **logged instead of sent** (safe no-op).                                          |
 | `EMAIL_FROM`                                          | recommended | Verified sender: `PriceAura <alerts@yourdomain.com>`                                                                   |
 | `EMAIL_SIGNING_SECRET`                                | optional    | Another random string for unsubscribe tokens (falls back to `CRON_SECRET`)                                             |
+| `BRIGHTDATA_API_KEY` / `BRIGHTDATA_SERP_ZONE`         | recommended | Bright Data **SERP API** credentials (Bearer token + zone name, default `serp_api1`). Primary comparison source; geo-tagged `gl=in`. |
+| `SERPAPI_API_KEY`                                     | optional    | SerpAPI (~100 free `google_shopping` searches/month) — source 2 when Bright Data is unset or fails                     |
 | `SCRAPERAPI_API_KEY` / `SCRAPINGBEE_API_KEY`          | optional    | Paid anti-bot APIs — used automatically when present                                                                   |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | optional    | Upstash REST credentials → real distributed rate limiting                                                              |
 
@@ -103,12 +105,15 @@ must be correct in production.
 
 ## 6. The cron (backend price checks)
 
-`vercel.json` schedules:
+`vercel.json` schedules **twice-daily** checks:
 
 ```json
-{ "path": "/api/cron/check-prices", "schedule": "0 4 * * *" } // daily 04:00 UTC
+{ "path": "/api/cron/check-prices", "schedule": "0 4,16 * * *" } // 04:00 & 16:00 UTC
 ```
 
+- Multiple runs per day require **Vercel Pro**. On Hobby, reduce to a single
+  daily entry: `"0 4 * * *"` — per-product intervals are still honoured, just
+  less often.
 - The endpoint **fails closed** in production if `CRON_SECRET` is missing, and
   rejects any request without `Authorization: Bearer $CRON_SECRET`.
 - It only scans **due** products (older than their per-product check interval),
@@ -117,23 +122,27 @@ must be correct in production.
 - Aggregator requests (Bing Shopping / Google Shopping) are spaced 3–7 s apart
   in cron (batch mode) so we never hammer a source in a loop.
 
-### Where the prices come from (free-first)
+### Where the prices come from (bright-data first, free fallbacks)
 
-Every "search by name" (and every re-track of a Bing/Google Shopping link)
-runs one aggregate multi-store comparison through this chain:
+Every "search by name" (and every re-track of a Shopping link) runs one
+aggregate multi-store comparison through this chain:
 
-1. **Bing Shopping** — free & unlimited; plain server HTML from
+1. **Bright Data SERP API** (optional `BRIGHTDATA_API_KEY` +
+   `BRIGHTDATA_SERP_ZONE`) — Google Shopping results as JSON through Bright
+   Data's SERP zone, geo-tagged `gl=in`, with a structured `shopping[]` array
+   (title, price, shop, thumbnail). Flipkart listings are detected and badged
+   distinctly from other merchants.
+2. **Bing Shopping** — free & unlimited; plain server HTML from
    `bing.com/shop`, aggregated offers from Myntra, Ajio, Vijay Sales,
-   Reliance Digital, Nykaa, eBay, Walmart and more. This is the default
-   path and needs **zero API keys**.
-2. **SerpAPI `google_shopping`** (optional `SERPAPI_API_KEY`, ~100 free
+   Reliance Digital, Nykaa, eBay, Walmart and more. Needs **zero API keys**.
+3. **SerpAPI `google_shopping`** (optional `SERPAPI_API_KEY`, ~100 free
    searches/month) — real Google Shopping data as JSON, which additionally
    carries Amazon/Flipkart listings for many queries.
-3. **Google Shopping direct/proxies** (free) and **ScraperAPI /
+4. **Google Shopping direct/proxies** (free) and **ScraperAPI /
    ScrapingBee render APIs** (optional keys) — last-resort JS rendering
    for Google's results page.
 
-All three feed one `selectOffer()` ranking: same currency as the tracked
+All of them feed one `selectOffer()` ranking: same currency as the tracked
 product, preferred merchants (Amazon, Flipkart, Walmart, …) win ties,
 lowest price wins. The cron's due-check re-runs the same chain, so prices
 keep moving with the market.
@@ -167,24 +176,35 @@ fire hourly.
 BASE=https://your-domain
 
 curl -s $BASE/api/health                      # {"ok":true}
-curl -s $BASE/api/products                    # {"products":[]}
-# add a product (search mode = multi-store Shopping aggregator):
-curl -s -X POST $BASE/api/products \
+curl -s $BASE/api/search?q=iphone+15         # {"query":...,"source":...,"offers":[...]} (public compare)
+curl -s $BASE/api/products                   # {"products":[],"user":null} (signed out)
+curl -s $BASE/api/auth/session               # {"user":null}
+
+# register, capture the session cookie, then track a product:
+curl -s -c jar.txt -X POST $BASE/api/auth/register \
   -H 'Content-Type: application/json' \
-  -d '{"query":"Sony WH-1000XM5","frequency":6,"email":"you@example.com"}'
+  -d '{"email":"you@example.com","password":"long-passphrase","name":"You"}'
+curl -s -b jar.txt -X POST $BASE/api/products \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://www.flipkart.com/...","frequency":6,"email":"you@example.com"}'
+curl -s -b jar.txt $BASE/api/products        # {"products":[{...}],"user":{...}}
 curl -s -H "Authorization: Bearer $CRON_SECRET" $BASE/api/cron/check-prices
 ```
 
 Manual UI pass:
 
-- [ ] Search by name returns a real product with a real price
-- [ ] Paste-a-link mode works with an Amazon/Flipkart URL
+- [ ] Search by name shows a price-comparison panel (cheapest first, store
+      badges, lowest-price highlight) with a "Track" button per offer
+- [ ] Track on an offer prompts sign-in when signed out; saves the product when in
+- [ ] Paste-a-link mode works with an Amazon/Flipkart URL (sign-in required)
 - [ ] Unsupported host shows the friendly "not supported" message (no stack traces)
+- [ ] Light/dark toggle flips the whole UI and survives a reload
 - [ ] Manage → Edit alert price saves and updates the card
 - [ ] Manage → Price history draws the chart
 - [ ] Manage → delete removes the product (after confirm)
 - [ ] Adding an email shows the confirmation; the unsubscribe link in a real
       email removes it
+- [ ] Sign out clears the watchlist; sign back in restores it
 - [ ] `/privacy` and `/terms` render; footer links work
 - [ ] Homepage shows no fake stats (counts derive from real data)
 - [ ] Lighthouse: Performance / Accessibility / SEO ≥ 90
@@ -198,9 +218,13 @@ Manual UI pass:
   are only in Vercel logs.
 - API responses never expose subscriber emails (PII) — they are used only for
   sending alerts and are stripped from GET responses.
+- Products, sessions and emails are **per-user**; `/api/products*` returns 401
+  without a session cookie and never touches another user's rows.
+- Passwords are hashed with scrypt; sessions are random tokens hashed (SHA-256)
+  in the `sessions` table, delivered via an httpOnly cookie.
 - Direct scraping is restricted to an **allowlist of storefront hosts**
   (SSRF guard); everything else goes through the Shopping search chain
-  (Bing → SerpAPI → Google).
+  (Bright Data → Bing → SerpAPI → Google).
 - Emails HTML-escape scraped titles; unsubscribe links are HMAC-signed.
 - Security headers (CSP, HSTS, X-Frame-Options, …) ship via `next.config.mjs`.
 - Cron requires `CRON_SECRET` in production.
@@ -226,4 +250,3 @@ Manual UI pass:
 - Playwright E2E against the preview deployment
 - Move `generator`-era placeholder assets (`public/placeholder*`) to real
   product imagery if desired
-- Account/auth layer if the dashboard ever becomes private per-user
